@@ -20,7 +20,7 @@ INSTALL_DIR="$HOME/bot-playermc-v2"
 clear
 echo -e "${CYAN}"
 echo "╔══════════════════════════════════════════════════════════╗"
-echo "║       🤖  Minecraft Bot - Auto Installer v3               ║"
+echo "║       🤖  Minecraft Bot - Auto Installer v2               ║"
 echo "║      github.com/NebulaCloudID/Bot-player-mc-v2           ║"
 echo "╚══════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
@@ -85,11 +85,11 @@ cd "$INSTALL_DIR"
 
 echo -e "${YELLOW}⬇️  Mendownload file dari GitHub...${NC}"
 
-# Download botv3.js
-echo -e "   → botv3.js"
-curl -fsSL "$RAW_URL/botv3.js" -o botv3.js
+# Download bot.js
+echo -e "   → bot.js"
+curl -fsSL "$RAW_URL/bot.js" -o bot.js
 if [ $? -ne 0 ]; then
-  echo -e "${RED}❌ Gagal download botv3.js!${NC}"
+  echo -e "${RED}❌ Gagal download bot.js!${NC}"
   echo -e "   Pastikan repo sudah public: github.com/$GITHUB_USER/$GITHUB_REPO"
   exit 1
 fi
@@ -107,8 +107,8 @@ echo ""
 # ============================================================
 # INSTALL DEPENDENCIES
 # ============================================================
-echo -e "${YELLOW}📦 Menginstall dependencies (mineflayer, bedrock-protocol, minecraft-protocol)...${NC}"
-npm install mineflayer bedrock-protocol minecraft-protocol --silent
+echo -e "${YELLOW}📦 Menginstall dependencies (mineflayer)...${NC}"
+npm install --silent
 if [ $? -ne 0 ]; then
   echo -e "${RED}❌ npm install gagal!${NC}"
   exit 1
@@ -125,12 +125,12 @@ echo "║              ✅ Instalasi Selesai!                       ║"
 echo "╚══════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
 echo -e "  📁 Lokasi    : ${BOLD}$INSTALL_DIR${NC}"
-echo -e "  🚀 Cara run  : ${BOLD}cd ~/bot-playermc-v2 && node botv3.js${NC}"
+echo -e "  🚀 Cara run  : ${BOLD}cd ~/bot-playermc-v2 && node bot.js${NC}"
 echo ""
 echo -e "${CYAN}  Mau langsung jalankan sekarang? (y/n)${NC}"
 read -p "  → " RUN_NOW
 
 if [[ "$RUN_NOW" == "y" || "$RUN_NOW" == "Y" ]]; then
   echo ""
-  node botv3.js
+  node bot.js
 fi
