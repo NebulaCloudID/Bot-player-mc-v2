@@ -506,6 +506,7 @@ function createBot(botName, index) {
   }
 
   bot._pvpActive = false;
+  bot._reconnecting = false;
   activeBots.set(botName, bot);
 
   bot.once('spawn', () => {
@@ -521,16 +522,26 @@ function createBot(botName, index) {
   bot.on('kicked', (reason) => {
     totalDisconnected++;
     let r = reason;
-    try { r = JSON.parse(reason)?.text || reason; } catch (e) {}
+    try {
+      if (typeof reason === 'object') {
+        r = reason.text || reason.translate || JSON.stringify(reason);
+      } else {
+        const parsed = JSON.parse(reason);
+        r = parsed.text || parsed.translate || parsed.extra?.[0]?.text || reason;
+      }
+    } catch (e) { r = String(reason); }
     console.log(`  ⚠️  [${botName}] Kicked: ${r}`);
     cleanupBot(botName);
-    if (CONFIG.autoReconnect) {
+    if (CONFIG.autoReconnect && !bot._reconnecting) {
+      bot._reconnecting = true;
       console.log(`  🔄 [${botName}] Reconnect dalam ${CONFIG.reconnectDelay / 1000}s...`);
       setTimeout(() => createBot(botName, index), CONFIG.reconnectDelay);
     }
   });
 
   bot.on('error', (err) => {
+    // EPIPE/ECONNRESET: koneksi putus paksa dari server, sudah ditangani oleh event 'end'/'kicked'
+    if (err.code === 'EPIPE' || err.code === 'ECONNRESET') return;
     if (err.code === 'ECONNREFUSED') {
       console.log(`  ❌ [${botName}] Koneksi ditolak — cek IP/port server!`);
     } else if (err.code === 'ENOTFOUND') {
@@ -539,7 +550,8 @@ function createBot(botName, index) {
       console.log(`  ❌ [${botName}] Error: ${err.message}`);
     }
     cleanupBot(botName);
-    if (CONFIG.autoReconnect) {
+    if (CONFIG.autoReconnect && !bot._reconnecting) {
+      bot._reconnecting = true;
       setTimeout(() => createBot(botName, index), CONFIG.reconnectDelay);
     }
   });
@@ -548,7 +560,8 @@ function createBot(botName, index) {
     totalDisconnected++;
     console.log(`  🔌 [${botName}] Disconnect: ${reason}`);
     cleanupBot(botName);
-    if (CONFIG.autoReconnect && reason !== 'manual') {
+    if (CONFIG.autoReconnect && reason !== 'manual' && !bot._reconnecting) {
+      bot._reconnecting = true;
       setTimeout(() => createBot(botName, index), CONFIG.reconnectDelay);
     }
   });
