@@ -4,7 +4,7 @@
  *  Dibuat untuk menguji kapasitas server Minecraft
  *  Library: Mineflayer (Node.js)
  *  Author: NebulaCloudID
- *  Update: + PvP (limit target) + Random Build + Dig (hancurin block)
+ *  Update: + PvP Fix + Dig Fix (tunggu hancur, limit 10 block)
  * ============================================================
  */
 
@@ -38,9 +38,9 @@ async function getInput() {
     const pvpLimitRaw = (await ask('  🎯 Max target dipukul per bot   : ')).trim();
     pvpLimit = parseInt(pvpLimitRaw) || 3;
   }
-  const buildRaw     = (await ask('  \u26CF\uFE0F  Aktifkan Random Build? (y/n) : ')).trim().toLowerCase();
+  const buildRaw     = (await ask('  🏗️  Aktifkan Random Build? (y/n) : ')).trim().toLowerCase();
   const buildEnabled = buildRaw === 'y';
-  const digRaw       = (await ask('  \u26CF\uFE0F  Aktifkan Dig (hancurin block)? (y/n): ')).trim().toLowerCase();
+  const digRaw       = (await ask('  ⛏️  Aktifkan Dig (hancurin block)? (y/n): ')).trim().toLowerCase();
   const digEnabled   = digRaw === 'y';
 
   rl.close();
@@ -83,23 +83,24 @@ const CONFIG = {
   },
   pvp: {
     enabled: false,
-    maxTargets: 3,        // Limit berapa target yang dipukul
-    attackRadius: 4,      // Radius pencarian target (block)
-    attackInterval: 2000, // Interval serang (ms)
-    targetPlayers: true,  // Serang player
-    targetMobs: true,     // Serang hostile mob
-    avoidFriendlyMobs: true, // Hindari serang mob jinak
+    maxTargets: 3,
+    attackRadius: 4,
+    attackInterval: 1500,  // lebih cepat biar kena
+    targetPlayers: true,
+    targetMobs: true,
+    avoidFriendlyMobs: true,
   },
   build: {
     enabled: false,
-    interval: 60000,      // Interval build (ms)
-    maxHeight: 5,         // Tinggi maks struktur
-    maxSize: 5,           // Ukuran luas maks (5x5)
+    interval: 60000,
+    maxHeight: 5,
+    maxSize: 5,
   },
   dig: {
     enabled: false,
-    interval: 4000,       // Interval cari & hancurin block baru (ms)
-    radius: 3,            // Radius pencarian block (block)
+    checkInterval: 500,    // cek terus tiap 500ms, bukan 4 detik
+    maxInventoryBlocks: 10, // berhenti kalau inventory sudah 10 block
+    radius: 3,
     blacklist: new Set([
       'bedrock', 'barrier', 'command_block', 'chain_command_block',
       'repeating_command_block', 'structure_block', 'jigsaw',
@@ -113,10 +114,12 @@ const CONFIG = {
 // DAFTAR MOB HOSTILE (untuk targeting PvP)
 // ============================================================
 const HOSTILE_MOBS = new Set([
-  'zombie', 'skeleton', 'creeper', 'spider', 'enderman',
+  'zombie', 'skeleton', 'creeper', 'spider', 'cave_spider', 'enderman',
   'witch', 'blaze', 'ghast', 'slime', 'phantom', 'drowned',
   'husk', 'stray', 'pillager', 'ravager', 'vindicator',
-  'evoker', 'vex', 'wither_skeleton', 'magma_cube',
+  'evoker', 'vex', 'wither_skeleton', 'magma_cube', 'silverfish',
+  'endermite', 'guardian', 'elder_guardian', 'shulker', 'hoglin',
+  'zoglin', 'piglin_brute', 'warden',
 ]);
 
 const FRIENDLY_MOBS = new Set([
@@ -124,6 +127,8 @@ const FRIENDLY_MOBS = new Set([
   'wolf', 'cat', 'ocelot', 'parrot', 'rabbit', 'bat', 'squid',
   'villager', 'iron_golem', 'snow_golem', 'bee', 'fox', 'panda',
   'polar_bear', 'turtle', 'dolphin', 'cod', 'salmon', 'tropical_fish',
+  'axolotl', 'glow_squid', 'allay', 'frog', 'tadpole', 'camel',
+  'sniffer',
 ]);
 
 // ============================================================
@@ -154,6 +159,10 @@ const activeBots = new Map();
 let totalConnected    = 0;
 let totalDisconnected = 0;
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 // ============================================================
 // GERAKAN HUMAN-LIKE
 // ============================================================
@@ -162,8 +171,7 @@ function startHumanMovement(bot) {
 
   const interval = setInterval(() => {
     try {
-      // Kalau lagi PvP, jangan gerak random dulu
-      if (bot._pvpActive) return;
+      if (bot._pvpActive || bot._digging) return;
 
       bot.clearControlStates();
       const cfg = CONFIG.movement;
@@ -211,56 +219,56 @@ function startRandomChat(bot) {
 }
 
 // ============================================================
-// PvP — Serang target terbatas
+// PvP — FIX: approach target, equip sword/weapon, then attack
 // ============================================================
 function startPvP(bot, botName) {
   if (!CONFIG.pvp.enabled) return;
 
-  let attackedCount = 0; // Hitung berapa target sudah diserang sesi ini
-
-  const interval = setInterval(() => {
-    try {
-      // Reset hitungan tiap 60 detik biar bot terus aktif
-      // (logika: limit per "sesi", bukan selamanya)
-    } catch (e) {}
-  }, 60000);
+  let attackedCount = 0;
+  bot._pvpActive = false;
 
   // Reset counter tiap 60 detik
   const resetInterval = setInterval(() => {
     attackedCount = 0;
-    bot._pvpActive = false;
   }, 60000);
 
-  const attackInterval = setInterval(() => {
+  const attackInterval = setInterval(async () => {
     try {
-      if (attackedCount >= CONFIG.pvp.maxTargets) return; // Sudah capai limit
+      if (bot._pvpActive) return;
+      if (attackedCount >= CONFIG.pvp.maxTargets) return;
+      if (!bot.entity) return;
 
       const radius = CONFIG.pvp.attackRadius;
-      let target = null;
-
-      // Cari entity dalam radius
       const entities = Object.values(bot.entities);
+
+      // ---- Cari kandidat target ----
       const candidates = entities.filter(e => {
-        if (!e || !e.position) return false;
+        if (!e || !e.position || !e.isValid) return false;
+
         const dist = bot.entity.position.distanceTo(e.position);
         if (dist > radius) return false;
 
+        // Target player
         if (e.type === 'player' && CONFIG.pvp.targetPlayers) {
-          return e.username !== bot.username; // Jangan serang diri sendiri
+          return e.username !== bot.username;
         }
+
+        // Target mob — pakai e.name (string nama mob, bukan username)
         if (e.type === 'mob' && CONFIG.pvp.targetMobs) {
-          const mobName = e.name ? e.name.toLowerCase() : '';
+          const mobName = (e.name || e.displayName || '').toLowerCase().replace(/ /g, '_');
           if (CONFIG.pvp.avoidFriendlyMobs && FRIENDLY_MOBS.has(mobName)) return false;
-          return HOSTILE_MOBS.has(mobName) || !FRIENDLY_MOBS.has(mobName);
+          // Serbu kalau hostile, atau kalau bukan friendly
+          return HOSTILE_MOBS.has(mobName);
         }
+
         return false;
       });
 
       if (candidates.length === 0) return;
 
       // Pilih target terdekat
-      target = candidates.reduce((closest, e) => {
-        const d = bot.entity.position.distanceTo(e.position);
+      const target = candidates.reduce((closest, e) => {
+        const d  = bot.entity.position.distanceTo(e.position);
         const cd = closest ? bot.entity.position.distanceTo(closest.position) : Infinity;
         return d < cd ? e : closest;
       }, null);
@@ -268,31 +276,168 @@ function startPvP(bot, botName) {
       if (!target) return;
 
       bot._pvpActive = true;
-      attackedCount++;
 
-      // Look at target lalu serang
-      bot.lookAt(target.position.offset(0, target.height || 1, 0), true, () => {
-        try {
-          bot.attack(target);
-          console.log(`  ⚔️  [${botName}] Menyerang: ${target.username || target.name || 'entity'} (${attackedCount}/${CONFIG.pvp.maxTargets})`);
-        } catch (e) {}
-      });
+      // Equip senjata terbaik di inventory (sword > axe > apapun)
+      const weapon = bot.inventory.items().find(i =>
+        i.name.includes('sword') || i.name.includes('axe')
+      );
+      if (weapon) {
+        try { await bot.equip(weapon, 'hand'); } catch (e) {}
+      }
 
-      // Kejar target (sprint forward)
-      bot.setControlState('sprint', true);
-      bot.setControlState('forward', true);
-      setTimeout(() => {
-        try {
-          bot.clearControlStates();
-          bot._pvpActive = false;
-        } catch (e) {}
-      }, 800);
+      // Hitung jarak ke target
+      const dist = bot.entity.position.distanceTo(target.position);
 
-    } catch (e) {}
+      // Kalau terlalu jauh, kejar dulu
+      if (dist > 2.5) {
+        bot.setControlState('sprint', true);
+        bot.setControlState('forward', true);
+
+        // Hadap ke target selama ngejar
+        const chaseInterval = setInterval(() => {
+          try {
+            if (!target.isValid || !bot.entity) return;
+            bot.lookAt(target.position.offset(0, target.height ? target.height * 0.9 : 1, 0), true);
+          } catch (e) {}
+        }, 100);
+
+        // Tunggu sampai dekat (max 3 detik)
+        let waited = 0;
+        while (waited < 3000) {
+          await sleep(100);
+          waited += 100;
+          if (!bot.entity) break;
+          const newDist = bot.entity.position.distanceTo(target.position);
+          if (newDist <= 2.5) break;
+        }
+        clearInterval(chaseInterval);
+        bot.clearControlStates();
+      }
+
+      // Hadap target lalu pukul
+      try {
+        await bot.lookAt(target.position.offset(0, target.height ? target.height * 0.9 : 1, 0), true);
+        // Tunggu cooldown swing (charge penuh = lebih sakit)
+        await sleep(600);
+        bot.attack(target);
+        attackedCount++;
+        const targetName = target.username || target.name || target.displayName || 'entity';
+        console.log(`  ⚔️  [${botName}] Menyerang: ${targetName} (${attackedCount}/${CONFIG.pvp.maxTargets})`);
+      } catch (e) {
+        // Target sudah mati atau hilang
+      }
+
+      bot._pvpActive = false;
+    } catch (e) {
+      bot._pvpActive = false;
+    }
   }, CONFIG.pvp.attackInterval);
 
-  bot._pvpInterval    = attackInterval;
+  bot._pvpInterval      = attackInterval;
   bot._pvpResetInterval = resetInterval;
+}
+
+// ============================================================
+// DIG — FIX: await bot.dig() sampai block hancur, limit inventory
+// ============================================================
+function startDig(bot, botName) {
+  if (!CONFIG.dig.enabled) return;
+
+  bot._digging = false;
+
+  // Hitung block di inventory (semua item yang bukan tool/weapon)
+  function countInventoryBlocks() {
+    return bot.inventory.items().filter(i => {
+      // Exclude tools, weapons, armor
+      const n = i.name;
+      return !(
+        n.includes('sword') || n.includes('axe') || n.includes('pickaxe') ||
+        n.includes('shovel') || n.includes('hoe') || n.includes('helmet') ||
+        n.includes('chestplate') || n.includes('leggings') || n.includes('boots') ||
+        n.includes('bow') || n.includes('crossbow') || n.includes('trident') ||
+        n.includes('shield') || n.includes('bucket') || n.includes('flint')
+      );
+    }).reduce((sum, i) => sum + i.count, 0);
+  }
+
+  // Cari block terdekat yang bisa dihancur
+  function findDigTarget() {
+    if (!bot.entity) return null;
+    const pos    = bot.entity.position.floored();
+    const radius = CONFIG.dig.radius;
+    let   best   = null;
+    let   bestD  = Infinity;
+
+    for (let dx = -radius; dx <= radius; dx++) {
+      for (let dy = -radius; dy <= radius; dy++) {
+        for (let dz = -radius; dz <= radius; dz++) {
+          const b = bot.blockAt(pos.offset(dx, dy, dz));
+          if (!b) continue;
+          if (b.name === 'air' || b.name === 'cave_air' || b.name === 'void_air') continue;
+          if (CONFIG.dig.blacklist.has(b.name)) continue;
+          if (!bot.canDigBlock(b)) continue;
+
+          // Jangan hancurin block yang bot berdiri di atasnya (bisa jatuh)
+          const bx = b.position.x, by = b.position.y, bz = b.position.z;
+          const ex = pos.x, ey = pos.y, ez = pos.z;
+          if (bx === ex && by === ey - 1 && bz === ez) continue; // lantai kaki bot
+
+          const d = Math.abs(dx) + Math.abs(dy) + Math.abs(dz);
+          if (d < bestD) {
+            bestD = d;
+            best  = b;
+          }
+        }
+      }
+    }
+    return best;
+  }
+
+  async function doDigCycle() {
+    if (bot._digging) return;   // Sedang menghancurkan, tunggu
+    if (!bot.entity) return;
+
+    // Cek limit inventory
+    const blockCount = countInventoryBlocks();
+    if (blockCount >= CONFIG.dig.maxInventoryBlocks) {
+      // Sudah 10 block, berhenti nge-dig
+      return;
+    }
+
+    const target = findDigTarget();
+    if (!target) return;
+
+    bot._digging = true;
+    try {
+      // Hadap ke block dulu
+      await bot.lookAt(target.position.offset(0.5, 0.5, 0.5), true);
+
+      // Equip pickaxe/shovel/axe kalau ada
+      const bestTool = bot.inventory.items().find(i =>
+        i.name.includes('pickaxe') || i.name.includes('shovel') ||
+        i.name.includes('axe')     || i.name.includes('hoe')
+      );
+      if (bestTool) {
+        try { await bot.equip(bestTool, 'hand'); } catch (e) {}
+      }
+
+      console.log(`  ⛏️  [${botName}] Hancurin: ${target.name} @ (${target.position.x},${target.position.y},${target.position.z}) | Inventory: ${blockCount}/${CONFIG.dig.maxInventoryBlocks}`);
+
+      // *** KUNCI FIX: await bot.dig() — tunggu sampai block benar-benar hancur ***
+      await bot.dig(target);
+
+      console.log(`  ✅ [${botName}] Block hancur! Inventory: ${countInventoryBlocks()}/${CONFIG.dig.maxInventoryBlocks}`);
+    } catch (e) {
+      // Block mungkin sudah hilang atau ada penghalang, skip
+    } finally {
+      bot._digging = false;
+    }
+  }
+
+  // Pakai interval pendek (500ms) — tapi doDigCycle punya guard _digging
+  // sehingga tidak double-dig; dia hanya mulai dig baru kalau yang lama selesai
+  const interval = setInterval(() => doDigCycle(), CONFIG.dig.checkInterval);
+  bot._digInterval = interval;
 }
 
 // ============================================================
@@ -301,10 +446,7 @@ function startPvP(bot, botName) {
 function startRandomBuild(bot, botName) {
   if (!CONFIG.build.enabled) return;
 
-  // Tipe struktur yang bisa dibuat
-  const buildTypes = ['tower', 'wall', 'floor', 'pyramid', 'random'];
-
-  // Block yang bisa dipakai (nama sesuai Mineflayer)
+  const buildTypes  = ['tower', 'wall', 'floor', 'pyramid', 'random'];
   const buildBlocks = [
     'dirt', 'cobblestone', 'oak_planks', 'stone', 'sand',
     'gravel', 'oak_log', 'oak_leaves', 'glass', 'bricks',
@@ -312,29 +454,23 @@ function startRandomBuild(bot, botName) {
 
   async function doBuild() {
     try {
-      const botPos  = bot.entity.position.floored();
+      const botPos    = bot.entity.position.floored();
       const buildType = buildTypes[Math.floor(Math.random() * buildTypes.length)];
       const blockName = buildBlocks[Math.floor(Math.random() * buildBlocks.length)];
-      const size      = 2 + Math.floor(Math.random() * (CONFIG.build.maxSize - 1)); // 2..maxSize
-      const height    = 1 + Math.floor(Math.random() * CONFIG.build.maxHeight);     // 1..maxHeight
+      const size      = 2 + Math.floor(Math.random() * (CONFIG.build.maxSize - 1));
+      const height    = 1 + Math.floor(Math.random() * CONFIG.build.maxHeight);
 
       console.log(`  🏗️  [${botName}] Build: ${buildType} (${size}x${height}) dari ${blockName}`);
 
-      // Cari block di inventory
       const block = bot.inventory.items().find(i => i.name === blockName);
-      if (!block) {
-        // Kalau ga ada block, skip
-        return;
-      }
+      if (!block) return;
       await bot.equip(block, 'hand');
 
-      // Posisi awal build (di depan bot)
       const startX = botPos.x + 1;
       const startY = botPos.y;
       const startZ = botPos.z;
 
       if (buildType === 'tower') {
-        // Tower: 1 kolom ke atas
         for (let y = 0; y < height; y++) {
           const targetBlock = bot.blockAt(new bot.entity.position.constructor(startX, startY + y - 1, startZ));
           if (targetBlock) {
@@ -342,9 +478,7 @@ function startRandomBuild(bot, botName) {
           }
           await sleep(300);
         }
-
       } else if (buildType === 'wall') {
-        // Wall: baris horizontal
         for (let x = 0; x < size; x++) {
           for (let y = 0; y < Math.min(height, 3); y++) {
             const targetBlock = bot.blockAt(new bot.entity.position.constructor(startX + x, startY + y - 1, startZ));
@@ -354,9 +488,7 @@ function startRandomBuild(bot, botName) {
             await sleep(200);
           }
         }
-
       } else if (buildType === 'floor') {
-        // Floor: lantai flat NxN
         for (let x = 0; x < size; x++) {
           for (let z = 0; z < size; z++) {
             const targetBlock = bot.blockAt(new bot.entity.position.constructor(startX + x, startY - 1, startZ + z));
@@ -366,9 +498,7 @@ function startRandomBuild(bot, botName) {
             await sleep(150);
           }
         }
-
       } else if (buildType === 'pyramid') {
-        // Pyramid: dari besar ke kecil
         const levels = Math.min(height, Math.floor(size / 2) + 1);
         for (let lvl = 0; lvl < levels; lvl++) {
           const s = size - lvl * 2;
@@ -385,9 +515,7 @@ function startRandomBuild(bot, botName) {
             }
           }
         }
-
       } else {
-        // Random: taruh block di posisi acak dalam radius
         const blockCount = size * size;
         for (let i = 0; i < blockCount; i++) {
           const rx = Math.floor(Math.random() * size);
@@ -404,67 +532,14 @@ function startRandomBuild(bot, botName) {
       }
 
       console.log(`  ✅ [${botName}] Build selesai!`);
-    } catch (e) {
-      // Build bisa gagal kalau bot disconnect, ignore saja
-    }
+    } catch (e) {}
   }
 
-  // Jalankan build pertama setelah 10 detik, lalu tiap interval
   const timeoutFirst = setTimeout(() => doBuild(), 10000);
-  const interval = setInterval(() => doBuild(), CONFIG.build.interval);
+  const interval     = setInterval(() => doBuild(), CONFIG.build.interval);
 
   bot._buildTimeout  = timeoutFirst;
   bot._buildInterval = interval;
-}
-
-// ============================================================
-// DIG — Hancurin block apapun di sekitar bot
-// ============================================================
-function startDig(bot, botName) {
-  if (!CONFIG.dig.enabled) return;
-
-  async function doDigCycle() {
-    try {
-      if (!bot.entity) return;
-      const pos = bot.entity.position.floored();
-      const radius = CONFIG.dig.radius;
-      const candidates = [];
-
-      // Scan block dalam radius
-      for (let dx = -radius; dx <= radius; dx++) {
-        for (let dy = -radius; dy <= radius; dy++) {
-          for (let dz = -radius; dz <= radius; dz++) {
-            const b = bot.blockAt(pos.offset(dx, dy, dz));
-            if (!b) continue;
-            if (b.name === 'air' || b.name === 'cave_air' || b.name === 'void_air') continue;
-            if (CONFIG.dig.blacklist.has(b.name)) continue;
-            if (!bot.canDigBlock(b)) continue;
-            candidates.push(b);
-          }
-        }
-      }
-
-      if (candidates.length === 0) return;
-
-      // Pilih block acak dari kandidat
-      const target = candidates[Math.floor(Math.random() * candidates.length)];
-
-      // Look at block, lalu hancurin
-      await bot.lookAt(target.position.offset(0.5, 0.5, 0.5), true);
-      await bot.dig(target);
-      console.log(`  ⛏️  [${botName}] Hancurin: ${target.name} @ (${target.position.x},${target.position.y},${target.position.z})`);
-    } catch (e) {
-      // Block mungkin sudah hilang atau tidak bisa dihancur, skip saja
-    }
-  }
-
-  const interval = setInterval(() => doDigCycle(), CONFIG.dig.interval);
-  bot._digInterval = interval;
-}
-
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 // ============================================================
@@ -473,14 +548,14 @@ function sleep(ms) {
 function cleanupBot(botName) {
   const bot = activeBots.get(botName);
   if (!bot) return;
-  try { clearInterval(bot._movementInterval); } catch (e) {}
-  try { clearInterval(bot._chatInterval); } catch (e) {}
-  try { clearInterval(bot._pvpInterval); } catch (e) {}
-  try { clearInterval(bot._pvpResetInterval); } catch (e) {}
-  try { clearInterval(bot._buildInterval); } catch (e) {}
-  try { clearInterval(bot._digInterval); } catch (e) {}
-  try { clearTimeout(bot._buildTimeout); } catch (e) {}
-  try { bot.clearControlStates(); } catch (e) {}
+  try { clearInterval(bot._movementInterval); }   catch (e) {}
+  try { clearInterval(bot._chatInterval); }        catch (e) {}
+  try { clearInterval(bot._pvpInterval); }         catch (e) {}
+  try { clearInterval(bot._pvpResetInterval); }    catch (e) {}
+  try { clearInterval(bot._buildInterval); }       catch (e) {}
+  try { clearInterval(bot._digInterval); }         catch (e) {}
+  try { clearTimeout(bot._buildTimeout); }         catch (e) {}
+  try { bot.clearControlStates(); }                catch (e) {}
   activeBots.delete(botName);
 }
 
@@ -505,7 +580,8 @@ function createBot(botName, index) {
     return;
   }
 
-  bot._pvpActive = false;
+  bot._pvpActive    = false;
+  bot._digging      = false;
   bot._reconnecting = false;
   activeBots.set(botName, bot);
 
@@ -540,7 +616,6 @@ function createBot(botName, index) {
   });
 
   bot.on('error', (err) => {
-    // EPIPE/ECONNRESET: koneksi putus paksa dari server, sudah ditangani oleh event 'end'/'kicked'
     if (err.code === 'EPIPE' || err.code === 'ECONNRESET') return;
     if (err.code === 'ECONNREFUSED') {
       console.log(`  ❌ [${botName}] Koneksi ditolak — cek IP/port server!`);
@@ -580,7 +655,7 @@ async function spawnAllBots() {
   console.log(`  Delay   : ${CONFIG.spawnDelay}ms antar bot`);
   console.log(`  PvP     : ${CONFIG.pvp.enabled ? `✅ (max ${CONFIG.pvp.maxTargets} target/60s)` : '❌'}`);
   console.log(`  Build   : ${CONFIG.build.enabled ? '✅ (random build aktif)' : '❌'}`);
-  console.log(`  Dig     : ${CONFIG.dig.enabled ? '✅ (hancurin block aktif)' : '❌'}`);
+  console.log(`  Dig     : ${CONFIG.dig.enabled ? `✅ (limit ${CONFIG.dig.maxInventoryBlocks} block)` : '❌'}`);
   console.log('──────────────────────────────────────────────────────────');
   console.log('  Spawning bot...\n');
 
