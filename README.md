@@ -1,16 +1,16 @@
-# 🤖 Minecraft Bot - Load Testing v2
+# 🤖 Minecraft Bot - Load Testing v3
 
 > Dibuat oleh **NebulaCloudID**
 
-Script untuk load testing server Minecraft menggunakan [Mineflayer](https://github.com/PrismarineJS/mineflayer).  
-Versi 2 hadir dengan fitur **PvP** dan **Random Build**!
+Script untuk load testing server Minecraft menggunakan [Mineflayer](https://github.com/PrismarineJS/mineflayer) + [bedrock-protocol](https://github.com/PrismarineJS/bedrock-protocol).  
+Versi 3 hadir dengan dukungan **Java & Bedrock Edition**, **Block Breaking**, dan movement yang lebih natural!
 
 ---
 
 ## ⚡ Install Otomatis (1 Command)
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/NebulaCloudID/Bot-player-mc-v2/main/installer.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/NebulaCloudID/Bot-player-mc-v2/main/installer2.sh)
 ```
 
 Script akan otomatis:
@@ -29,10 +29,10 @@ git clone https://github.com/NebulaCloudID/Bot-player-mc-v2.git
 cd Bot-player-mc-v2
 
 # Install dependencies
-npm install
+npm install mineflayer bedrock-protocol minecraft-protocol
 
 # Jalankan bot
-node bot.js
+node botv3.js
 ```
 
 ---
@@ -42,68 +42,52 @@ node bot.js
 | Fitur | Keterangan |
 |---|---|
 | 🤖 Multi-bot | Spawn banyak bot sekaligus |
+| 🎮 Java & Bedrock | Support kedua edition |
 | 🏃 Human movement | Gerakan acak seperti pemain asli |
-| 💬 Random chat | Kirim pesan acak otomatis |
+| 💬 Random chat | Kirim pesan acak otomatis (anti-spam) |
+| ⛏️ Block Breaking | Hancurin block random di sekitar bot |
 | 🔄 Auto-reconnect | Konek ulang otomatis jika disconnect |
 | 📊 Status monitor | Laporan tiap 15 detik |
-| ⚔️ PvP | Bot bisa menyerang player & hostile mob (limit target) |
-| 🏗️ Random Build | Bot membangun struktur acak dari inventory |
+| 🔍 Auto-detect versi | Deteksi otomatis versi server Java |
 
 ---
 
-## ⚔️ Fitur PvP
+## ⛏️ Fitur Block Breaking
 
-Bot dapat menyerang entitas di sekitarnya secara otomatis dengan batasan target yang bisa dikonfigurasi.
+Bot secara otomatis menghancurkan block di sekitarnya dengan delay random agar terlihat natural.
 
-- **Target**: Player dan hostile mob (zombie, skeleton, creeper, dll)
-- **Mob jinak aman**: Sapi, babi, villager, dll tidak diserang
-- **Limit target**: Tentukan berapa maksimal target per bot per 60 detik
-- **Radius serangan**: 4 block (bisa diubah di `CONFIG.pvp.attackRadius`)
-- **Auto-sprint**: Bot sprint mengejar target saat menyerang
-
-Saat setup, kamu akan ditanya:
-```
-⚔️  Aktifkan PvP? (y/n)          : y
-🎯 Max target dipukul per bot   : 3
-```
+- **Radius**: 4 block dari posisi bot
+- **Delay**: 3–6 detik per block (acak)
+- **Blacklist aman**: bedrock, barrier, command block, portal, dll tidak dihancurin
+- Aktifkan saat setup: `⛏️  Hancurin block random? (y/n) : y`
 
 ---
 
-## 🏗️ Fitur Random Build
+## 🎮 Dukungan Bedrock Edition
 
-Bot secara otomatis membangun struktur random menggunakan block yang ada di inventory.
+Bot v3 support Minecraft **Bedrock Edition** via `bedrock-protocol`:
 
-### Tipe Struktur
-| Tipe | Keterangan |
-|---|---|
-| 🗼 Tower | Kolom vertikal ke atas |
-| 🧱 Wall | Dinding horizontal |
-| 🟫 Floor | Lantai flat N×N |
-| 🔺 Pyramid | Piramida bertingkat |
-| 🎲 Random | Block di posisi acak |
-
-### Block yang Digunakan
-`dirt`, `cobblestone`, `oak_planks`, `stone`, `sand`, `gravel`, `oak_log`, `oak_leaves`, `glass`, `bricks`
-
-> **Catatan:** Bot harus punya block di inventory. Cocok untuk server **Survival** (dengan item) atau **Creative mode**.
-
-Saat setup, kamu akan ditanya:
-```
-🏗️  Aktifkan Random Build? (y/n) : y
-```
+- Mode offline (tanpa akun Xbox)
+- Chat & movement otomatis
+- Auto-reconnect jika disconnect
+- Pilih edition saat setup: `🎮 Edition (1/2) : 2`
 
 ---
 
 ## 🖥️ Contoh Setup
 
 ```
-🌐 Domain / IP server          : play.myserver.net
-🔌 Port server (default 25565)  : 25565
-🤖 Jumlah bot (default 10)      : 20
-🎮 Versi Minecraft (cth: 1.20.1): 1.20.4
-⚔️  Aktifkan PvP? (y/n)          : y
-🎯 Max target dipukul per bot   : 5
-🏗️  Aktifkan Random Build? (y/n) : y
+[1] Java  [2] Bedrock
+🎮 Edition (1/2)                   : 1
+🌐 Domain / IP server              : play.myserver.net
+🔌 Port server                     : 25565
+🎮 Versi Minecraft (kosong=auto)   : 
+🤖 Jumlah bot                      : 20
+⏱️  Delay antar spawn (ms)          : 1500
+🏃 Gerakan human-like? (y/n)       : y
+💬 Chat random anti-spam? (y/n)    : y
+⛏️  Hancurin block random? (y/n)    : n
+🔄 Auto reconnect? (y/n)           : y
 ```
 
 ---
@@ -125,4 +109,6 @@ Saat setup, kamu akan ditanya:
 
 ## 📦 Dependencies
 
-- [mineflayer](https://github.com/PrismarineJS/mineflayer) ^4.14.0
+- [mineflayer](https://github.com/PrismarineJS/mineflayer) ^4.14.0 — Java Edition
+- [bedrock-protocol](https://github.com/PrismarineJS/bedrock-protocol) — Bedrock Edition
+- [minecraft-protocol](https://github.com/PrismarineJS/node-minecraft-protocol) — Auto-detect versi Java
