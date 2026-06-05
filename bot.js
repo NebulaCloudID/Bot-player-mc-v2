@@ -4,12 +4,39 @@
  *  Dibuat untuk menguji kapasitas server Minecraft
  *  Library: Mineflayer (Node.js)
  *  Author: NebulaCloudID
- *  Update: + PvP Fix + Dig Fix (tunggu hancur, limit 10 block)
+ *  Update: + Role Acak per Bot + Inventory Limit 64 (1 stack)
+ *          + Fighter diam di tempat (tidak chase)
+ *          + Builder otomatis setelah inventory penuh
  * ============================================================
  */
 
 const mineflayer = require('mineflayer');
 const readline   = require('readline');
+
+// ============================================================
+// ROLE DEFINITIONS
+// Setiap bot dapat satu role secara acak saat spawn
+// ============================================================
+// WALKER  : jalan-jalan, chat, tidak dig tidak pvp
+// DIGGER  : fokus hancurin block, setelah inventory penuh → random build
+// FIGHTER : pvp diam di tempat (tidak chase), sampai mati
+// BUILDER : random build saja, tidak dig tidak pvp
+// ============================================================
+const ROLES = ['walker', 'digger', 'fighter', 'builder'];
+
+// Bobot probabilitas role (sesuaikan sesuai kebutuhan):
+// walker 35%, digger 25%, fighter 25%, builder 15%
+const ROLE_WEIGHTS = [35, 25, 25, 15];
+
+function pickRole() {
+  const total = ROLE_WEIGHTS.reduce((a, b) => a + b, 0);
+  let r = Math.random() * total;
+  for (let i = 0; i < ROLES.length; i++) {
+    r -= ROLE_WEIGHTS[i];
+    if (r <= 0) return ROLES[i];
+  }
+  return ROLES[0];
+}
 
 // ============================================================
 // INPUT INTERAKTIF — semua input selesai dulu, baru bot jalan
@@ -31,21 +58,10 @@ async function getInput() {
   const countRaw   = (await ask('  🤖 Jumlah bot (default 10)      : ')).trim();
   const botCount   = parseInt(countRaw) || 10;
   const ver        = (await ask('  🎮 Versi Minecraft (cth: 1.20.1): ')).trim() || '1.20.1';
-  const pvpRaw     = (await ask('  ⚔️  Aktifkan PvP? (y/n)          : ')).trim().toLowerCase();
-  const pvpEnabled = pvpRaw === 'y';
-  let pvpLimit     = 3;
-  if (pvpEnabled) {
-    const pvpLimitRaw = (await ask('  🎯 Max target dipukul per bot   : ')).trim();
-    pvpLimit = parseInt(pvpLimitRaw) || 3;
-  }
-  const buildRaw     = (await ask('  🏗️  Aktifkan Random Build? (y/n) : ')).trim().toLowerCase();
-  const buildEnabled = buildRaw === 'y';
-  const digRaw       = (await ask('  ⛏️  Aktifkan Dig (hancurin block)? (y/n): ')).trim().toLowerCase();
-  const digEnabled   = digRaw === 'y';
 
   rl.close();
   console.log('');
-  return { host, port, botCount, version: ver, pvpEnabled, pvpLimit, buildEnabled, digEnabled };
+  return { host, port, botCount, version: ver };
 }
 
 // ============================================================
@@ -79,27 +95,26 @@ const CONFIG = {
       'mantap',
       'nice server',
       'berapa ping kalian?',
+      'gaskeun',
+      'siapa yang lag?',
     ],
   },
   pvp: {
-    enabled: false,
-    maxTargets: 3,
-    attackRadius: 4,
-    attackInterval: 1500,  // lebih cepat biar kena
+    attackRadius: 4,       // radius deteksi musuh
+    attackInterval: 1500,  // ms antar serangan
     targetPlayers: true,
     targetMobs: true,
     avoidFriendlyMobs: true,
+    maxTargets: 999,       // fighter terus serang, tidak ada limit per menit
   },
   build: {
-    enabled: false,
     interval: 60000,
     maxHeight: 5,
     maxSize: 5,
   },
   dig: {
-    enabled: false,
-    checkInterval: 500,    // cek terus tiap 500ms, bukan 4 detik
-    maxInventoryBlocks: 10, // berhenti kalau inventory sudah 10 block
+    checkInterval: 500,
+    maxInventoryBlocks: 64,  // 1 stack penuh → berhenti dig, mulai build
     radius: 3,
     blacklist: new Set([
       'bedrock', 'barrier', 'command_block', 'chain_command_block',
@@ -111,7 +126,7 @@ const CONFIG = {
 };
 
 // ============================================================
-// DAFTAR MOB HOSTILE (untuk targeting PvP)
+// DAFTAR MOB
 // ============================================================
 const HOSTILE_MOBS = new Set([
   'zombie', 'skeleton', 'creeper', 'spider', 'cave_spider', 'enderman',
@@ -164,7 +179,7 @@ function sleep(ms) {
 }
 
 // ============================================================
-// GERAKAN HUMAN-LIKE
+// GERAKAN HUMAN-LIKE (untuk WALKER & BUILDER)
 // ============================================================
 function startHumanMovement(bot) {
   const directions = ['forward', 'back', 'left', 'right'];
@@ -205,7 +220,7 @@ function startHumanMovement(bot) {
 }
 
 // ============================================================
-// CHAT RANDOM
+// CHAT RANDOM (semua role)
 // ============================================================
 function startRandomChat(bot) {
   if (!CONFIG.chat.enabled) return;
@@ -219,54 +234,39 @@ function startRandomChat(bot) {
 }
 
 // ============================================================
-// PvP — FIX: approach target, equip sword/weapon, then attack
+// PvP — FIGHTER: DIAM DI TEMPAT, tidak chase, hanya pukul
+// yang masuk radius (sampai bot mati / disconnect)
 // ============================================================
 function startPvP(bot, botName) {
-  if (!CONFIG.pvp.enabled) return;
-
-  let attackedCount = 0;
   bot._pvpActive = false;
-
-  // Reset counter tiap 60 detik
-  const resetInterval = setInterval(() => {
-    attackedCount = 0;
-  }, 60000);
 
   const attackInterval = setInterval(async () => {
     try {
       if (bot._pvpActive) return;
-      if (attackedCount >= CONFIG.pvp.maxTargets) return;
       if (!bot.entity) return;
 
-      const radius = CONFIG.pvp.attackRadius;
+      const radius   = CONFIG.pvp.attackRadius;
       const entities = Object.values(bot.entities);
 
-      // ---- Cari kandidat target ----
       const candidates = entities.filter(e => {
         if (!e || !e.position || !e.isValid) return false;
-
         const dist = bot.entity.position.distanceTo(e.position);
         if (dist > radius) return false;
 
-        // Target player
         if (e.type === 'player' && CONFIG.pvp.targetPlayers) {
           return e.username !== bot.username;
         }
-
-        // Target mob — pakai e.name (string nama mob, bukan username)
         if (e.type === 'mob' && CONFIG.pvp.targetMobs) {
           const mobName = (e.name || e.displayName || '').toLowerCase().replace(/ /g, '_');
           if (CONFIG.pvp.avoidFriendlyMobs && FRIENDLY_MOBS.has(mobName)) return false;
-          // Serbu kalau hostile, atau kalau bukan friendly
           return HOSTILE_MOBS.has(mobName);
         }
-
         return false;
       });
 
       if (candidates.length === 0) return;
 
-      // Pilih target terdekat
+      // Pilih target terdekat dalam radius
       const target = candidates.reduce((closest, e) => {
         const d  = bot.entity.position.distanceTo(e.position);
         const cd = closest ? bot.entity.position.distanceTo(closest.position) : Infinity;
@@ -277,7 +277,7 @@ function startPvP(bot, botName) {
 
       bot._pvpActive = true;
 
-      // Equip senjata terbaik di inventory (sword > axe > apapun)
+      // Equip senjata terbaik
       const weapon = bot.inventory.items().find(i =>
         i.name.includes('sword') || i.name.includes('axe')
       );
@@ -285,47 +285,17 @@ function startPvP(bot, botName) {
         try { await bot.equip(weapon, 'hand'); } catch (e) {}
       }
 
-      // Hitung jarak ke target
-      const dist = bot.entity.position.distanceTo(target.position);
-
-      // Kalau terlalu jauh, kejar dulu
-      if (dist > 2.5) {
-        bot.setControlState('sprint', true);
-        bot.setControlState('forward', true);
-
-        // Hadap ke target selama ngejar
-        const chaseInterval = setInterval(() => {
-          try {
-            if (!target.isValid || !bot.entity) return;
-            bot.lookAt(target.position.offset(0, target.height ? target.height * 0.9 : 1, 0), true);
-          } catch (e) {}
-        }, 100);
-
-        // Tunggu sampai dekat (max 3 detik)
-        let waited = 0;
-        while (waited < 3000) {
-          await sleep(100);
-          waited += 100;
-          if (!bot.entity) break;
-          const newDist = bot.entity.position.distanceTo(target.position);
-          if (newDist <= 2.5) break;
-        }
-        clearInterval(chaseInterval);
-        bot.clearControlStates();
-      }
-
-      // Hadap target lalu pukul
+      // DIAM — hanya hadap ke target lalu serang, TIDAK chase
       try {
-        await bot.lookAt(target.position.offset(0, target.height ? target.height * 0.9 : 1, 0), true);
-        // Tunggu cooldown swing (charge penuh = lebih sakit)
-        await sleep(600);
+        await bot.lookAt(
+          target.position.offset(0, target.height ? target.height * 0.9 : 1, 0),
+          true
+        );
+        await sleep(600); // tunggu swing cooldown
         bot.attack(target);
-        attackedCount++;
         const targetName = target.username || target.name || target.displayName || 'entity';
-        console.log(`  ⚔️  [${botName}] Menyerang: ${targetName} (${attackedCount}/${CONFIG.pvp.maxTargets})`);
-      } catch (e) {
-        // Target sudah mati atau hilang
-      }
+        console.log(`  ⚔️  [${botName}] Serang (diam): ${targetName}`);
+      } catch (e) {}
 
       bot._pvpActive = false;
     } catch (e) {
@@ -333,22 +303,19 @@ function startPvP(bot, botName) {
     }
   }, CONFIG.pvp.attackInterval);
 
-  bot._pvpInterval      = attackInterval;
-  bot._pvpResetInterval = resetInterval;
+  bot._pvpInterval = attackInterval;
 }
 
 // ============================================================
-// DIG — FIX: await bot.dig() sampai block hancur, limit inventory
+// DIG — DIGGER: hancurin block sampai 64 item (1 stack)
+// Setelah penuh → langsung trigger random build
 // ============================================================
 function startDig(bot, botName) {
-  if (!CONFIG.dig.enabled) return;
+  bot._digging       = false;
+  bot._inventoryFull = false; // flag: sudah 64 block, pindah ke build
 
-  bot._digging = false;
-
-  // Hitung block di inventory (semua item yang bukan tool/weapon)
   function countInventoryBlocks() {
     return bot.inventory.items().filter(i => {
-      // Exclude tools, weapons, armor
       const n = i.name;
       return !(
         n.includes('sword') || n.includes('axe') || n.includes('pickaxe') ||
@@ -360,7 +327,6 @@ function startDig(bot, botName) {
     }).reduce((sum, i) => sum + i.count, 0);
   }
 
-  // Cari block terdekat yang bisa dihancur
   function findDigTarget() {
     if (!bot.entity) return null;
     const pos    = bot.entity.position.floored();
@@ -377,16 +343,12 @@ function startDig(bot, botName) {
           if (CONFIG.dig.blacklist.has(b.name)) continue;
           if (!bot.canDigBlock(b)) continue;
 
-          // Jangan hancurin block yang bot berdiri di atasnya (bisa jatuh)
           const bx = b.position.x, by = b.position.y, bz = b.position.z;
           const ex = pos.x, ey = pos.y, ez = pos.z;
-          if (bx === ex && by === ey - 1 && bz === ez) continue; // lantai kaki bot
+          if (bx === ex && by === ey - 1 && bz === ez) continue; // jangan hancurin lantai sendiri
 
           const d = Math.abs(dx) + Math.abs(dy) + Math.abs(dz);
-          if (d < bestD) {
-            bestD = d;
-            best  = b;
-          }
+          if (d < bestD) { bestD = d; best = b; }
         }
       }
     }
@@ -394,13 +356,19 @@ function startDig(bot, botName) {
   }
 
   async function doDigCycle() {
-    if (bot._digging) return;   // Sedang menghancurkan, tunggu
+    if (bot._digging) return;
     if (!bot.entity) return;
+    if (bot._inventoryFull) return; // sudah penuh, biarkan builder loop ambil alih
 
-    // Cek limit inventory
     const blockCount = countInventoryBlocks();
+
+    // Inventory sudah 64 (1 stack) → flag penuh, trigger build sekali
     if (blockCount >= CONFIG.dig.maxInventoryBlocks) {
-      // Sudah 10 block, berhenti nge-dig
+      if (!bot._inventoryFull) {
+        bot._inventoryFull = true;
+        console.log(`  📦 [${botName}] Inventory penuh (${blockCount} block)! Mulai build...`);
+        doBuild(bot, botName); // trigger build langsung
+      }
       return;
     }
 
@@ -409,10 +377,8 @@ function startDig(bot, botName) {
 
     bot._digging = true;
     try {
-      // Hadap ke block dulu
       await bot.lookAt(target.position.offset(0.5, 0.5, 0.5), true);
 
-      // Equip pickaxe/shovel/axe kalau ada
       const bestTool = bot.inventory.items().find(i =>
         i.name.includes('pickaxe') || i.name.includes('shovel') ||
         i.name.includes('axe')     || i.name.includes('hoe')
@@ -421,123 +387,111 @@ function startDig(bot, botName) {
         try { await bot.equip(bestTool, 'hand'); } catch (e) {}
       }
 
-      console.log(`  ⛏️  [${botName}] Hancurin: ${target.name} @ (${target.position.x},${target.position.y},${target.position.z}) | Inventory: ${blockCount}/${CONFIG.dig.maxInventoryBlocks}`);
-
-      // *** KUNCI FIX: await bot.dig() — tunggu sampai block benar-benar hancur ***
+      console.log(`  ⛏️  [${botName}] Hancurin: ${target.name} | Inventory: ${blockCount}/${CONFIG.dig.maxInventoryBlocks}`);
       await bot.dig(target);
-
       console.log(`  ✅ [${botName}] Block hancur! Inventory: ${countInventoryBlocks()}/${CONFIG.dig.maxInventoryBlocks}`);
     } catch (e) {
-      // Block mungkin sudah hilang atau ada penghalang, skip
+      // Block sudah hilang atau penghalang, skip
     } finally {
       bot._digging = false;
     }
   }
 
-  // Pakai interval pendek (500ms) — tapi doDigCycle punya guard _digging
-  // sehingga tidak double-dig; dia hanya mulai dig baru kalau yang lama selesai
   const interval = setInterval(() => doDigCycle(), CONFIG.dig.checkInterval);
   bot._digInterval = interval;
 }
 
 // ============================================================
-// RANDOM BUILD — Bikin struktur random dari block tanah
+// RANDOM BUILD — digunakan oleh BUILDER dan DIGGER (setelah penuh)
 // ============================================================
-function startRandomBuild(bot, botName) {
-  if (!CONFIG.build.enabled) return;
-
+async function doBuild(bot, botName) {
   const buildTypes  = ['tower', 'wall', 'floor', 'pyramid', 'random'];
   const buildBlocks = [
     'dirt', 'cobblestone', 'oak_planks', 'stone', 'sand',
     'gravel', 'oak_log', 'oak_leaves', 'glass', 'bricks',
   ];
 
-  async function doBuild() {
-    try {
-      const botPos    = bot.entity.position.floored();
-      const buildType = buildTypes[Math.floor(Math.random() * buildTypes.length)];
-      const blockName = buildBlocks[Math.floor(Math.random() * buildBlocks.length)];
-      const size      = 2 + Math.floor(Math.random() * (CONFIG.build.maxSize - 1));
-      const height    = 1 + Math.floor(Math.random() * CONFIG.build.maxHeight);
+  try {
+    if (!bot.entity) return;
 
-      console.log(`  🏗️  [${botName}] Build: ${buildType} (${size}x${height}) dari ${blockName}`);
+    const botPos    = bot.entity.position.floored();
+    const buildType = buildTypes[Math.floor(Math.random() * buildTypes.length)];
+    const size      = 2 + Math.floor(Math.random() * (CONFIG.build.maxSize - 1));
+    const height    = 1 + Math.floor(Math.random() * CONFIG.build.maxHeight);
 
-      const block = bot.inventory.items().find(i => i.name === blockName);
-      if (!block) return;
-      await bot.equip(block, 'hand');
+    // Cari block yang ada di inventory (dari dig atau bawaan)
+    const availableBlocks = buildBlocks.filter(name =>
+      bot.inventory.items().some(i => i.name === name)
+    );
+    if (availableBlocks.length === 0) return;
+    const blockName = availableBlocks[Math.floor(Math.random() * availableBlocks.length)];
 
-      const startX = botPos.x + 1;
-      const startY = botPos.y;
-      const startZ = botPos.z;
+    console.log(`  🏗️  [${botName}] Build: ${buildType} (${size}x${height}) dari ${blockName}`);
 
-      if (buildType === 'tower') {
-        for (let y = 0; y < height; y++) {
-          const targetBlock = bot.blockAt(new bot.entity.position.constructor(startX, startY + y - 1, startZ));
-          if (targetBlock) {
-            try { await bot.placeBlock(targetBlock, new bot.entity.position.constructor(0, 1, 0)); } catch (e) {}
-          }
-          await sleep(300);
+    const block = bot.inventory.items().find(i => i.name === blockName);
+    if (!block) return;
+    await bot.equip(block, 'hand');
+
+    const startX = botPos.x + 1;
+    const startY = botPos.y;
+    const startZ = botPos.z;
+
+    const Vec3 = bot.entity.position.constructor;
+
+    if (buildType === 'tower') {
+      for (let y = 0; y < height; y++) {
+        const tb = bot.blockAt(new Vec3(startX, startY + y - 1, startZ));
+        if (tb) try { await bot.placeBlock(tb, new Vec3(0, 1, 0)); } catch (e) {}
+        await sleep(300);
+      }
+    } else if (buildType === 'wall') {
+      for (let x = 0; x < size; x++) {
+        for (let y = 0; y < Math.min(height, 3); y++) {
+          const tb = bot.blockAt(new Vec3(startX + x, startY + y - 1, startZ));
+          if (tb) try { await bot.placeBlock(tb, new Vec3(0, 1, 0)); } catch (e) {}
+          await sleep(200);
         }
-      } else if (buildType === 'wall') {
-        for (let x = 0; x < size; x++) {
-          for (let y = 0; y < Math.min(height, 3); y++) {
-            const targetBlock = bot.blockAt(new bot.entity.position.constructor(startX + x, startY + y - 1, startZ));
-            if (targetBlock) {
-              try { await bot.placeBlock(targetBlock, new bot.entity.position.constructor(0, 1, 0)); } catch (e) {}
-            }
-            await sleep(200);
-          }
-        }
-      } else if (buildType === 'floor') {
-        for (let x = 0; x < size; x++) {
-          for (let z = 0; z < size; z++) {
-            const targetBlock = bot.blockAt(new bot.entity.position.constructor(startX + x, startY - 1, startZ + z));
-            if (targetBlock) {
-              try { await bot.placeBlock(targetBlock, new bot.entity.position.constructor(0, 1, 0)); } catch (e) {}
-            }
-            await sleep(150);
-          }
-        }
-      } else if (buildType === 'pyramid') {
-        const levels = Math.min(height, Math.floor(size / 2) + 1);
-        for (let lvl = 0; lvl < levels; lvl++) {
-          const s = size - lvl * 2;
-          if (s <= 0) break;
-          for (let x = 0; x < s; x++) {
-            for (let z = 0; z < s; z++) {
-              const targetBlock = bot.blockAt(new bot.entity.position.constructor(
-                startX + lvl + x, startY + lvl - 1, startZ + lvl + z
-              ));
-              if (targetBlock) {
-                try { await bot.placeBlock(targetBlock, new bot.entity.position.constructor(0, 1, 0)); } catch (e) {}
-              }
-              await sleep(100);
-            }
-          }
-        }
-      } else {
-        const blockCount = size * size;
-        for (let i = 0; i < blockCount; i++) {
-          const rx = Math.floor(Math.random() * size);
-          const ry = Math.floor(Math.random() * height);
-          const rz = Math.floor(Math.random() * size);
-          const targetBlock = bot.blockAt(new bot.entity.position.constructor(
-            startX + rx, startY + ry - 1, startZ + rz
-          ));
-          if (targetBlock) {
-            try { await bot.placeBlock(targetBlock, new bot.entity.position.constructor(0, 1, 0)); } catch (e) {}
-          }
+      }
+    } else if (buildType === 'floor') {
+      for (let x = 0; x < size; x++) {
+        for (let z = 0; z < size; z++) {
+          const tb = bot.blockAt(new Vec3(startX + x, startY - 1, startZ + z));
+          if (tb) try { await bot.placeBlock(tb, new Vec3(0, 1, 0)); } catch (e) {}
           await sleep(150);
         }
       }
+    } else if (buildType === 'pyramid') {
+      const levels = Math.min(height, Math.floor(size / 2) + 1);
+      for (let lvl = 0; lvl < levels; lvl++) {
+        const s = size - lvl * 2;
+        if (s <= 0) break;
+        for (let x = 0; x < s; x++) {
+          for (let z = 0; z < s; z++) {
+            const tb = bot.blockAt(new Vec3(startX + lvl + x, startY + lvl - 1, startZ + lvl + z));
+            if (tb) try { await bot.placeBlock(tb, new Vec3(0, 1, 0)); } catch (e) {}
+            await sleep(100);
+          }
+        }
+      }
+    } else {
+      const blockCount = size * size;
+      for (let i = 0; i < blockCount; i++) {
+        const rx = Math.floor(Math.random() * size);
+        const ry = Math.floor(Math.random() * height);
+        const rz = Math.floor(Math.random() * size);
+        const tb = bot.blockAt(new Vec3(startX + rx, startY + ry - 1, startZ + rz));
+        if (tb) try { await bot.placeBlock(tb, new Vec3(0, 1, 0)); } catch (e) {}
+        await sleep(150);
+      }
+    }
+    console.log(`  ✅ [${botName}] Build selesai!`);
+  } catch (e) {}
+}
 
-      console.log(`  ✅ [${botName}] Build selesai!`);
-    } catch (e) {}
-  }
-
-  const timeoutFirst = setTimeout(() => doBuild(), 10000);
-  const interval     = setInterval(() => doBuild(), CONFIG.build.interval);
-
+function startRandomBuild(bot, botName) {
+  // Build pertama setelah 10 detik
+  const timeoutFirst = setTimeout(() => doBuild(bot, botName), 10000);
+  const interval     = setInterval(() => doBuild(bot, botName), CONFIG.build.interval);
   bot._buildTimeout  = timeoutFirst;
   bot._buildInterval = interval;
 }
@@ -551,7 +505,6 @@ function cleanupBot(botName) {
   try { clearInterval(bot._movementInterval); }   catch (e) {}
   try { clearInterval(bot._chatInterval); }        catch (e) {}
   try { clearInterval(bot._pvpInterval); }         catch (e) {}
-  try { clearInterval(bot._pvpResetInterval); }    catch (e) {}
   try { clearInterval(bot._buildInterval); }       catch (e) {}
   try { clearInterval(bot._digInterval); }         catch (e) {}
   try { clearTimeout(bot._buildTimeout); }         catch (e) {}
@@ -560,10 +513,12 @@ function cleanupBot(botName) {
 }
 
 // ============================================================
-// BUAT SATU BOT
+// BUAT SATU BOT — assign role acak
 // ============================================================
 function createBot(botName, index) {
-  console.log(`  [Bot ${String(index + 1).padStart(3)}] Connecting → ${botName}...`);
+  const role = pickRole();
+  const roleIcon = { walker: '🚶', digger: '⛏️ ', fighter: '⚔️ ', builder: '🏗️ ' }[role];
+  console.log(`  [Bot ${String(index + 1).padStart(3)}] Connecting → ${botName} | Role: ${roleIcon} ${role}...`);
 
   let bot;
   try {
@@ -580,19 +535,50 @@ function createBot(botName, index) {
     return;
   }
 
-  bot._pvpActive    = false;
-  bot._digging      = false;
-  bot._reconnecting = false;
+  bot._role          = role;
+  bot._pvpActive     = false;
+  bot._digging       = false;
+  bot._inventoryFull = false;
+  bot._reconnecting  = false;
   activeBots.set(botName, bot);
 
   bot.once('spawn', () => {
     totalConnected++;
-    console.log(`  ✅ [${botName}] Connected! (Aktif: ${activeBots.size})`);
-    if (CONFIG.movement.enabled) startHumanMovement(bot);
+    console.log(`  ✅ [${botName}] Connected! Role: ${roleIcon} ${role} (Aktif: ${activeBots.size})`);
+
+    // Semua bot chat
     startRandomChat(bot);
-    startPvP(bot, botName);
-    startRandomBuild(bot, botName);
-    startDig(bot, botName);
+
+    switch (role) {
+      case 'walker':
+        // Hanya jalan-jalan, lihat-lihat, chat
+        startHumanMovement(bot);
+        break;
+
+      case 'digger':
+        // Hancurin block sampai 64, lalu otomatis build, sambil sesekali gerak
+        startHumanMovement(bot); // tetap bergerak agar tidak statis total
+        startDig(bot, botName);
+        // Loop builder juga aktif, tapi diBuild baru jalan kalau _inventoryFull
+        // Pakai interval ringan agar setelah inventoryFull langsung lanjut build
+        const diggerBuildLoop = setInterval(() => {
+          if (bot._inventoryFull) doBuild(bot, botName);
+        }, CONFIG.build.interval);
+        bot._diggerBuildLoop = diggerBuildLoop;
+        break;
+
+      case 'fighter':
+        // Diam di tempat, serang musuh dalam radius
+        // TIDAK startHumanMovement (diam)
+        startPvP(bot, botName);
+        break;
+
+      case 'builder':
+        // Jalan-jalan + build random
+        startHumanMovement(bot);
+        startRandomBuild(bot, botName);
+        break;
+    }
   });
 
   bot.on('kicked', (reason) => {
@@ -607,6 +593,7 @@ function createBot(botName, index) {
       }
     } catch (e) { r = String(reason); }
     console.log(`  ⚠️  [${botName}] Kicked: ${r}`);
+    if (bot._diggerBuildLoop) clearInterval(bot._diggerBuildLoop);
     cleanupBot(botName);
     if (CONFIG.autoReconnect && !bot._reconnecting) {
       bot._reconnecting = true;
@@ -624,6 +611,7 @@ function createBot(botName, index) {
     } else {
       console.log(`  ❌ [${botName}] Error: ${err.message}`);
     }
+    if (bot._diggerBuildLoop) clearInterval(bot._diggerBuildLoop);
     cleanupBot(botName);
     if (CONFIG.autoReconnect && !bot._reconnecting) {
       bot._reconnecting = true;
@@ -634,6 +622,7 @@ function createBot(botName, index) {
   bot.on('end', (reason) => {
     totalDisconnected++;
     console.log(`  🔌 [${botName}] Disconnect: ${reason}`);
+    if (bot._diggerBuildLoop) clearInterval(bot._diggerBuildLoop);
     cleanupBot(botName);
     if (CONFIG.autoReconnect && reason !== 'manual' && !bot._reconnecting) {
       bot._reconnecting = true;
@@ -653,9 +642,8 @@ async function spawnAllBots() {
   console.log(`  Versi   : ${CONFIG.version}`);
   console.log(`  Jumlah  : ${CONFIG.botCount} bot`);
   console.log(`  Delay   : ${CONFIG.spawnDelay}ms antar bot`);
-  console.log(`  PvP     : ${CONFIG.pvp.enabled ? `✅ (max ${CONFIG.pvp.maxTargets} target/60s)` : '❌'}`);
-  console.log(`  Build   : ${CONFIG.build.enabled ? '✅ (random build aktif)' : '❌'}`);
-  console.log(`  Dig     : ${CONFIG.dig.enabled ? `✅ (limit ${CONFIG.dig.maxInventoryBlocks} block)` : '❌'}`);
+  console.log('  Role    : 🚶 Walker 35% | ⛏️  Digger 25% | ⚔️  Fighter 25% | 🏗️  Builder 15%');
+  console.log(`  Dig max : ${CONFIG.dig.maxInventoryBlocks} block (1 stack) → auto build`);
   console.log('──────────────────────────────────────────────────────────');
   console.log('  Spawning bot...\n');
 
@@ -676,7 +664,14 @@ async function spawnAllBots() {
   console.log('  📊 Status monitor aktif tiap 15 detik...\n');
 
   setInterval(() => {
-    console.log(`\n  📊 STATUS → Aktif: ${activeBots.size} | Connect: ${totalConnected} | Disconnect: ${totalDisconnected}\n`);
+    const roleCounts = { walker: 0, digger: 0, fighter: 0, builder: 0 };
+    for (const [, bot] of activeBots) {
+      if (bot._role && roleCounts[bot._role] !== undefined) roleCounts[bot._role]++;
+    }
+    console.log(
+      `\n  📊 STATUS → Aktif: ${activeBots.size} | Connect: ${totalConnected} | Disconnect: ${totalDisconnected}` +
+      ` | 🚶${roleCounts.walker} ⛏️ ${roleCounts.digger} ⚔️ ${roleCounts.fighter} 🏗️ ${roleCounts.builder}\n`
+    );
   }, 15000);
 }
 
@@ -687,6 +682,7 @@ process.on('SIGINT', () => {
   console.log('\n\n  🛑 Menghentikan semua bot...');
   for (const [name, bot] of activeBots) {
     try { bot.quit('Script dihentikan'); } catch (e) {}
+    if (bot._diggerBuildLoop) clearInterval(bot._diggerBuildLoop);
     cleanupBot(name);
   }
   console.log('  ✅ Semua bot disconnect. Bye!\n');
@@ -698,13 +694,9 @@ process.on('SIGINT', () => {
 // ============================================================
 (async () => {
   const input = await getInput();
-  CONFIG.host             = input.host;
-  CONFIG.port             = input.port;
-  CONFIG.botCount         = input.botCount;
-  CONFIG.version          = input.version;
-  CONFIG.pvp.enabled      = input.pvpEnabled;
-  CONFIG.pvp.maxTargets   = input.pvpLimit;
-  CONFIG.build.enabled    = input.buildEnabled;
-  CONFIG.dig.enabled      = input.digEnabled;
+  CONFIG.host     = input.host;
+  CONFIG.port     = input.port;
+  CONFIG.botCount = input.botCount;
+  CONFIG.version  = input.version;
   await spawnAllBots();
 })();
