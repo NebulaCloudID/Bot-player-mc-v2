@@ -1,0 +1,14 @@
+{
+  "name": "minecraft-bot",
+  "version": "1.0.0",
+  "description": "Minecraft Bot Load Testing - by NebulaCloudID",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "mineflayer": "^4.14.0"
+  },
+  "author": "NebulaCloudID",
+  "license": "MIT"
+}
