@@ -553,14 +553,32 @@ function createBot(botName, index) {
 
   bot.once('spawn', () => {
     totalConnected++;
-    console.log(`  ✅ [${botName}] Connected! (Aktif: ${activeBots.size})`);
 
-    // SEMUA BOT SELALU GERAK
+    // Semua bot selalu gerak & chat
     startHumanMovement(bot);
     startRandomChat(bot);
-    startPvP(bot, botName);
-    startRandomBuild(bot, botName);
-    startDig(bot, botName);
+
+    // ── Dig: hanya ~40% bot yang nge-dig ──────────────────────
+    // Sisanya tidak dig sama sekali, jadi tidak ngumpul di lubang
+    const willDig = CONFIG.dig.enabled && Math.random() < 0.4;
+
+    // ── PvP: hanya ~50% bot yang pvp ─────────────────────────
+    const willPvp = CONFIG.pvp.enabled && Math.random() < 0.5;
+
+    // ── Build: bot yang tidak dig punya chance 60% build ─────
+    const willBuild = CONFIG.build.enabled && (!willDig || Math.random() < 0.3);
+
+    const flags = [
+      willDig  ? '⛏️ dig'    : '',
+      willPvp  ? '⚔️ pvp'    : '',
+      willBuild? '🏗️ build'  : '',
+    ].filter(Boolean).join(' ') || '🚶 walk only';
+
+    console.log(`  ✅ [${botName}] Connected! → ${flags} (Aktif: ${activeBots.size})`);
+
+    if (willPvp)   startPvP(bot, botName);
+    if (willBuild) startRandomBuild(bot, botName);
+    if (willDig)   startDig(bot, botName);
   });
 
   bot.on('kicked', (reason) => {
