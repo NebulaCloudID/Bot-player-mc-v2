@@ -12,6 +12,12 @@
 const mineflayer = require('mineflayer');
 const readline   = require('readline');
 
+// Suppress EPIPE stack traces from mineflayer internal streams
+process.on('uncaughtException', (err) => {
+  if (err.code === 'EPIPE' || err.code === 'ECONNRESET' || err.code === 'ECONNABORTED') return;
+  console.error('Uncaught exception:', err.message);
+});
+
 // ============================================================
 // INPUT INTERAKTIF
 // ============================================================
@@ -173,7 +179,6 @@ function startHumanMovement(bot) {
 
   const interval = setInterval(() => {
     try {
-      // Kalau sedang nge-dig jangan gerak, PvP boleh tetap gerak
       if (bot._digging) return;
 
       bot.clearControlStates();
@@ -182,24 +187,32 @@ function startHumanMovement(bot) {
       if (Math.random() < 0.6) {
         const dir = directions[Math.floor(Math.random() * directions.length)];
         bot.setControlState(dir, true);
-        if (Math.random() < cfg.sprintChance) bot.setControlState('sprint', true);
-        if (Math.random() < cfg.sneakChance)  bot.setControlState('sneak', true);
 
-        if (Math.random() < cfg.jumpChance) {
+        // Sprint TANPA jump — kombinasi sprint+jump sering trigger anti-cheat flying
+        const doSprint = Math.random() < cfg.sprintChance;
+        if (doSprint)                    bot.setControlState('sprint', true);
+        if (Math.random() < cfg.sneakChance) bot.setControlState('sneak', true);
+
+        // Jump hanya kalau di tanah & tidak sprint, delay biar physics sync
+        if (!doSprint && Math.random() < cfg.jumpChance) {
           setTimeout(() => {
-            try { bot.setControlState('jump', true); } catch (e) {}
-            setTimeout(() => { try { bot.setControlState('jump', false); } catch (e) {} }, 300);
-          }, 200);
+            try {
+              if (bot.entity && bot.entity.onGround) {
+                bot.setControlState('jump', true);
+                setTimeout(() => { try { bot.setControlState('jump', false); } catch (e) {} }, 250);
+              }
+            } catch (e) {}
+          }, 400);
         }
 
         setTimeout(() => {
           try { bot.clearControlStates(); } catch (e) {}
-        }, 1000 + Math.random() * 2000);
+        }, 1200 + Math.random() * 2000);
       }
 
       if (Math.random() < cfg.lookAroundChance) {
         try {
-          bot.look((Math.random() * 2 - 1) * Math.PI, Math.random() * 0.6 - 0.3, false);
+          bot.look((Math.random() * 2 - 1) * Math.PI, Math.random() * 0.5 - 0.25, false);
         } catch (e) {}
       }
     } catch (e) {}
@@ -602,7 +615,7 @@ function createBot(botName, index) {
   });
 
   bot.on('error', (err) => {
-    if (err.code === 'EPIPE' || err.code === 'ECONNRESET') return;
+    if (err.code === 'EPIPE' || err.code === 'ECONNRESET' || err.code === 'ECONNABORTED') return;
     if (err.code === 'ECONNREFUSED') {
       console.log(`  ❌ [${botName}] Koneksi ditolak — cek IP/port server!`);
     } else if (err.code === 'ENOTFOUND') {
