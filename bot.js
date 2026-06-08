@@ -6,6 +6,7 @@
  *  Author: NebulaCloudID
  *  Update: + PvP Fix + Dig Fix (limit 64/1 stack → auto build)
  *          + Semua bot gerak (tidak ada yang diam)
+ *          + Configurable spawnDelay (anti connection throttle)
  * ============================================================
  */
 
@@ -38,6 +39,8 @@ async function getInput() {
   const countRaw   = (await ask('  🤖 Jumlah bot (default 10)      : ')).trim();
   const botCount   = parseInt(countRaw) || 10;
   const ver        = (await ask('  🎮 Versi Minecraft (cth: 1.20.1): ')).trim() || '1.20.1';
+  const delayRaw   = (await ask('  ⏱️  Delay antar bot ms (default 5000): ')).trim();
+  const spawnDelay = parseInt(delayRaw) || 5000;
   const pvpRaw     = (await ask('  ⚔️  Aktifkan PvP? (y/n)          : ')).trim().toLowerCase();
   const pvpEnabled = pvpRaw === 'y';
   let pvpLimit = 3;
@@ -52,7 +55,7 @@ async function getInput() {
 
   rl.close();
   console.log('');
-  return { host, port, botCount, version: ver, pvpEnabled, pvpLimit, buildEnabled, digEnabled };
+  return { host, port, botCount, version: ver, spawnDelay, pvpEnabled, pvpLimit, buildEnabled, digEnabled };
 }
 
 // ============================================================
@@ -63,7 +66,7 @@ const CONFIG = {
   port: 25565,
   version: '1.20.1',
   botCount: 10,
-  spawnDelay: 1500,
+  spawnDelay: 5000,
   reconnectDelay: 5000,
   autoReconnect: true,
   movement: {
@@ -108,7 +111,7 @@ const CONFIG = {
   dig: {
     enabled: false,
     checkInterval: 500,
-    maxInventoryBlocks: 64, // 1 stack penuh → auto build
+    maxInventoryBlocks: 64,
     radius: 3,
     blacklist: new Set([
       'bedrock', 'barrier', 'command_block', 'chain_command_block',
@@ -172,7 +175,7 @@ function sleep(ms) {
 }
 
 // ============================================================
-// GERAKAN HUMAN-LIKE — SEMUA BOT SELALU GERAK
+// GERAKAN HUMAN-LIKE
 // ============================================================
 function startHumanMovement(bot) {
   const directions = ['forward', 'back', 'left', 'right'];
@@ -188,12 +191,10 @@ function startHumanMovement(bot) {
         const dir = directions[Math.floor(Math.random() * directions.length)];
         bot.setControlState(dir, true);
 
-        // Sprint TANPA jump — kombinasi sprint+jump sering trigger anti-cheat flying
         const doSprint = Math.random() < cfg.sprintChance;
-        if (doSprint)                    bot.setControlState('sprint', true);
+        if (doSprint)                        bot.setControlState('sprint', true);
         if (Math.random() < cfg.sneakChance) bot.setControlState('sneak', true);
 
-        // Jump hanya kalau di tanah & tidak sprint, delay biar physics sync
         if (!doSprint && Math.random() < cfg.jumpChance) {
           setTimeout(() => {
             try {
@@ -236,7 +237,7 @@ function startRandomChat(bot) {
 }
 
 // ============================================================
-// PvP — chase + pukul, reset counter tiap 60 detik
+// PvP
 // ============================================================
 function startPvP(bot, botName) {
   if (!CONFIG.pvp.enabled) return;
@@ -291,7 +292,6 @@ function startPvP(bot, botName) {
 
       const dist = bot.entity.position.distanceTo(target.position);
 
-      // Chase kalau jauh
       if (dist > 2.5) {
         bot.setControlState('sprint', true);
         bot.setControlState('forward', true);
@@ -337,7 +337,7 @@ function startPvP(bot, botName) {
 }
 
 // ============================================================
-// DIG — limit 64 (1 stack), setelah penuh → auto build
+// DIG
 // ============================================================
 function startDig(bot, botName) {
   if (!CONFIG.dig.enabled) return;
@@ -372,7 +372,6 @@ function startDig(bot, botName) {
           if (b.name === 'air' || b.name === 'cave_air' || b.name === 'void_air') continue;
           if (CONFIG.dig.blacklist.has(b.name)) continue;
           if (!bot.canDigBlock(b)) continue;
-          // Jangan hancurin lantai sendiri
           if (b.position.x === pos.x && b.position.y === pos.y - 1 && b.position.z === pos.z) continue;
           const d = Math.abs(dx) + Math.abs(dy) + Math.abs(dz);
           if (d < bestD) { bestD = d; best = b; }
@@ -388,13 +387,12 @@ function startDig(bot, botName) {
 
     const blockCount = countInventoryBlocks();
 
-    // Inventory penuh (64) → berhenti dig, trigger build sekali lalu tunggu build selesai
     if (blockCount >= CONFIG.dig.maxInventoryBlocks) {
       if (!bot._inventoryFull) {
         bot._inventoryFull = true;
         console.log(`  📦 [${botName}] Inventory penuh (${blockCount} block)! Switch ke build...`);
         await doBuild(bot, botName);
-        bot._inventoryFull = false; // setelah build selesai, boleh dig lagi
+        bot._inventoryFull = false;
       }
       return;
     }
@@ -418,7 +416,6 @@ function startDig(bot, botName) {
       await bot.dig(target);
       console.log(`  ✅ [${botName}] Block hancur! Inv: ${countInventoryBlocks()}/${CONFIG.dig.maxInventoryBlocks}`);
     } catch (e) {
-      // Block sudah hilang, skip
     } finally {
       bot._digging = false;
     }
@@ -446,7 +443,6 @@ async function doBuild(bot, botName) {
     const size      = 2 + Math.floor(Math.random() * (CONFIG.build.maxSize - 1));
     const height    = 1 + Math.floor(Math.random() * CONFIG.build.maxHeight);
 
-    // Cari block yang tersedia di inventory
     const available = buildBlocks.filter(name => bot.inventory.items().some(i => i.name === name));
     if (available.length === 0) return;
     const blockName = available[Math.floor(Math.random() * available.length)];
@@ -567,24 +563,17 @@ function createBot(botName, index) {
   bot.once('spawn', () => {
     totalConnected++;
 
-    // Semua bot selalu gerak & chat
     startHumanMovement(bot);
     startRandomChat(bot);
 
-    // ── Dig: hanya ~40% bot yang nge-dig ──────────────────────
-    // Sisanya tidak dig sama sekali, jadi tidak ngumpul di lubang
-    const willDig = CONFIG.dig.enabled && Math.random() < 0.4;
-
-    // ── PvP: hanya ~50% bot yang pvp ─────────────────────────
-    const willPvp = CONFIG.pvp.enabled && Math.random() < 0.5;
-
-    // ── Build: bot yang tidak dig punya chance 60% build ─────
+    const willDig   = CONFIG.dig.enabled   && Math.random() < 0.4;
+    const willPvp   = CONFIG.pvp.enabled   && Math.random() < 0.5;
     const willBuild = CONFIG.build.enabled && (!willDig || Math.random() < 0.3);
 
     const flags = [
-      willDig  ? '⛏️ dig'    : '',
-      willPvp  ? '⚔️ pvp'    : '',
-      willBuild? '🏗️ build'  : '',
+      willDig   ? '⛏️ dig'   : '',
+      willPvp   ? '⚔️ pvp'   : '',
+      willBuild ? '🏗️ build' : '',
     ].filter(Boolean).join(' ') || '🚶 walk only';
 
     console.log(`  ✅ [${botName}] Connected! → ${flags} (Aktif: ${activeBots.size})`);
@@ -699,6 +688,7 @@ process.on('SIGINT', () => {
   CONFIG.port             = input.port;
   CONFIG.botCount         = input.botCount;
   CONFIG.version          = input.version;
+  CONFIG.spawnDelay       = input.spawnDelay;
   CONFIG.pvp.enabled      = input.pvpEnabled;
   CONFIG.pvp.maxTargets   = input.pvpLimit;
   CONFIG.build.enabled    = input.buildEnabled;
