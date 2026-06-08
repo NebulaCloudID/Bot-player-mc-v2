@@ -5,15 +5,15 @@
  *  Library: Mineflayer (Node.js)
  *  Author: NebulaCloudID
  *  Update: + PvP Fix + Dig Fix (limit 64/1 stack → auto build)
- *          + Semua bot gerak (tidak ada yang diam)
  *          + Configurable spawnDelay (anti connection throttle)
+ *          + Reconnect jitter (anti throttle wave)
+ *          + Pilihan mode gerak / diam
  * ============================================================
  */
 
 const mineflayer = require('mineflayer');
 const readline   = require('readline');
 
-// Suppress EPIPE stack traces from mineflayer internal streams
 process.on('uncaughtException', (err) => {
   if (err.code === 'EPIPE' || err.code === 'ECONNRESET' || err.code === 'ECONNABORTED') return;
   console.error('Uncaught exception:', err.message);
@@ -41,6 +41,14 @@ async function getInput() {
   const ver        = (await ask('  🎮 Versi Minecraft (cth: 1.20.1): ')).trim() || '1.20.1';
   const delayRaw   = (await ask('  ⏱️  Delay antar bot ms (default 5000): ')).trim();
   const spawnDelay = parseInt(delayRaw) || 5000;
+
+  console.log('');
+  console.log('  🚶 Mode Gerakan Bot:');
+  console.log('     1. Gerak (human-like movement)');
+  console.log('     2. Diam (bot tidak bergerak sama sekali)');
+  const moveRaw     = (await ask('  Pilih mode (1/2, default 1)     : ')).trim();
+  const moveEnabled = moveRaw !== '2';
+
   const pvpRaw     = (await ask('  ⚔️  Aktifkan PvP? (y/n)          : ')).trim().toLowerCase();
   const pvpEnabled = pvpRaw === 'y';
   let pvpLimit = 3;
@@ -55,7 +63,7 @@ async function getInput() {
 
   rl.close();
   console.log('');
-  return { host, port, botCount, version: ver, spawnDelay, pvpEnabled, pvpLimit, buildEnabled, digEnabled };
+  return { host, port, botCount, version: ver, spawnDelay, moveEnabled, pvpEnabled, pvpLimit, buildEnabled, digEnabled };
 }
 
 // ============================================================
@@ -68,9 +76,10 @@ const CONFIG = {
   botCount: 10,
   spawnDelay: 5000,
   reconnectDelay: 5000,
+  reconnectJitter: 10000, // random tambahan 0–10 detik biar reconnect tidak barengan
   autoReconnect: true,
   movement: {
-    enabled: true,
+    enabled: true,        // diset dari input
     interval: 3000,
     jumpChance: 0.3,
     sprintChance: 0.4,
@@ -174,10 +183,18 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// Delay reconnect dengan jitter random biar tidak wave barengan
+function reconnectDelay() {
+  const jitter = Math.floor(Math.random() * CONFIG.reconnectJitter);
+  return CONFIG.reconnectDelay + jitter;
+}
+
 // ============================================================
 // GERAKAN HUMAN-LIKE
 // ============================================================
 function startHumanMovement(bot) {
+  if (!CONFIG.movement.enabled) return; // mode diam → skip
+
   const directions = ['forward', 'back', 'left', 'right'];
 
   const interval = setInterval(() => {
@@ -563,18 +580,20 @@ function createBot(botName, index) {
   bot.once('spawn', () => {
     totalConnected++;
 
-    startHumanMovement(bot);
+    startHumanMovement(bot); // otomatis skip kalau mode diam
     startRandomChat(bot);
 
     const willDig   = CONFIG.dig.enabled   && Math.random() < 0.4;
     const willPvp   = CONFIG.pvp.enabled   && Math.random() < 0.5;
     const willBuild = CONFIG.build.enabled && (!willDig || Math.random() < 0.3);
 
+    const moveLabel = CONFIG.movement.enabled ? '🚶 gerak' : '🧍 diam';
     const flags = [
+      moveLabel,
       willDig   ? '⛏️ dig'   : '',
       willPvp   ? '⚔️ pvp'   : '',
       willBuild ? '🏗️ build' : '',
-    ].filter(Boolean).join(' ') || '🚶 walk only';
+    ].filter(Boolean).join(' ');
 
     console.log(`  ✅ [${botName}] Connected! → ${flags} (Aktif: ${activeBots.size})`);
 
@@ -598,8 +617,9 @@ function createBot(botName, index) {
     cleanupBot(botName);
     if (CONFIG.autoReconnect && !bot._reconnecting) {
       bot._reconnecting = true;
-      console.log(`  🔄 [${botName}] Reconnect dalam ${CONFIG.reconnectDelay / 1000}s...`);
-      setTimeout(() => createBot(botName, index), CONFIG.reconnectDelay);
+      const delay = reconnectDelay();
+      console.log(`  🔄 [${botName}] Reconnect dalam ${(delay / 1000).toFixed(1)}s...`);
+      setTimeout(() => createBot(botName, index), delay);
     }
   });
 
@@ -615,7 +635,8 @@ function createBot(botName, index) {
     cleanupBot(botName);
     if (CONFIG.autoReconnect && !bot._reconnecting) {
       bot._reconnecting = true;
-      setTimeout(() => createBot(botName, index), CONFIG.reconnectDelay);
+      const delay = reconnectDelay();
+      setTimeout(() => createBot(botName, index), delay);
     }
   });
 
@@ -625,7 +646,8 @@ function createBot(botName, index) {
     cleanupBot(botName);
     if (CONFIG.autoReconnect && reason !== 'manual' && !bot._reconnecting) {
       bot._reconnecting = true;
-      setTimeout(() => createBot(botName, index), CONFIG.reconnectDelay);
+      const delay = reconnectDelay();
+      setTimeout(() => createBot(botName, index), delay);
     }
   });
 
@@ -641,6 +663,7 @@ async function spawnAllBots() {
   console.log(`  Versi   : ${CONFIG.version}`);
   console.log(`  Jumlah  : ${CONFIG.botCount} bot`);
   console.log(`  Delay   : ${CONFIG.spawnDelay}ms antar bot`);
+  console.log(`  Gerak   : ${CONFIG.movement.enabled ? '✅ human-like movement' : '❌ diam'}`);
   console.log(`  PvP     : ${CONFIG.pvp.enabled ? `✅ (max ${CONFIG.pvp.maxTargets} target/60s)` : '❌'}`);
   console.log(`  Build   : ${CONFIG.build.enabled ? '✅' : '❌'}`);
   console.log(`  Dig     : ${CONFIG.dig.enabled ? `✅ (limit 64 block → auto build)` : '❌'}`);
@@ -659,10 +682,17 @@ async function spawnAllBots() {
   }
 
   console.log('\n  ✅ Semua bot sudah di-spawn!');
+
+  // Tunggu 5 detik biar bot sempat connect, lalu print status awal
+  setTimeout(() => {
+    const joinRate = CONFIG.botCount > 0 ? ((activeBots.size / CONFIG.botCount) * 100).toFixed(0) : 0;
+    console.log(`\n  📊 STATUS → Aktif: ${activeBots.size}/${CONFIG.botCount} bot (${joinRate}% join) | Total Connect: ${totalConnected} | Disconnect: ${totalDisconnected}\n`);
+  }, 5000);
   console.log('  📊 Status monitor aktif tiap 15 detik...\n');
 
   setInterval(() => {
-    console.log(`\n  📊 STATUS → Aktif: ${activeBots.size} | Connect: ${totalConnected} | Disconnect: ${totalDisconnected}\n`);
+    const joinRate = CONFIG.botCount > 0 ? ((activeBots.size / CONFIG.botCount) * 100).toFixed(0) : 0;
+    console.log(`\n  📊 STATUS → Aktif: ${activeBots.size}/${CONFIG.botCount} bot (${joinRate}% join) | Total Connect: ${totalConnected} | Disconnect: ${totalDisconnected}\n`);
   }, 15000);
 }
 
@@ -684,14 +714,15 @@ process.on('SIGINT', () => {
 // ============================================================
 (async () => {
   const input = await getInput();
-  CONFIG.host             = input.host;
-  CONFIG.port             = input.port;
-  CONFIG.botCount         = input.botCount;
-  CONFIG.version          = input.version;
-  CONFIG.spawnDelay       = input.spawnDelay;
-  CONFIG.pvp.enabled      = input.pvpEnabled;
-  CONFIG.pvp.maxTargets   = input.pvpLimit;
-  CONFIG.build.enabled    = input.buildEnabled;
-  CONFIG.dig.enabled      = input.digEnabled;
+  CONFIG.host               = input.host;
+  CONFIG.port               = input.port;
+  CONFIG.botCount           = input.botCount;
+  CONFIG.version            = input.version;
+  CONFIG.spawnDelay         = input.spawnDelay;
+  CONFIG.movement.enabled   = input.moveEnabled;
+  CONFIG.pvp.enabled        = input.pvpEnabled;
+  CONFIG.pvp.maxTargets     = input.pvpLimit;
+  CONFIG.build.enabled      = input.buildEnabled;
+  CONFIG.dig.enabled        = input.digEnabled;
   await spawnAllBots();
 })();
